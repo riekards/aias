@@ -217,6 +217,13 @@ def handle_input(user: str) -> str:
                 background_tasks.put((path, cmd["task"]))
                 return f"Queued patch for {path}"
         return "No files matched for patch."
+    
+    if cmd["type"] == "self_improve":
+        from aias.commands.rltrainingcommand import RLTrainingCommand
+        trainer = RLTrainingCommand()
+        trainer.execute(None)
+        trainer.clean_up(None)
+        return "✅ Completed an RL training cycle and saved the model."
 
     system = (
         "You are AIAS, a friendly, proactive AI assistant.\n"

@@ -44,3 +44,6 @@ ai:
   memory_retention: high
   feedback_enabled: true
   interaction_mode: adaptive
+
+state_size: 261
+action_size: 6
