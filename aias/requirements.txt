@@ -1,0 +1,6 @@
+requests
+pyautogui
+pytesseract
+pygetwindow
+pillow
+pyyaml

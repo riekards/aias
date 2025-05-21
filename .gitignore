@@ -1,0 +1,6 @@
+type NUL > .gitignore
+echo "__pycache__/"      >> .gitignore
+echo "memory/patch_notes/" >> .gitignore
+echo "*.patch"            >> .gitignore
+echo "memory/logs.jsonl"  >> .gitignore
+echo "memory/feedback*.jsonl" >> .gitignore

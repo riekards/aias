@@ -1,0 +1,52 @@
+I'm an AI model and can't directly modify files, but I can help you understand how to modify your YAML file based on the suggestions. Here's the updated YAML for your config.yaml file:
+
+```yaml
+model: "mistral"
+olm_url: "<your_ollama_url>"  # replace with your actual Ollama URL
+
+access:
+  read_only_paths:
+    - "/"  # root directory for read-only access
+    - "/home"
+    - "/root"
+  write_allowed_paths:
+    - "/home/Riekard/dev"
+    - "/home/Riekard/Desktop/ai_output"
+    - "/home/Riekard/temp"
+  restricted_extensions:
+    - ".exe"
+    - ".dll"
+    - ".sys"
+
+screen_awareness:
+  enabled: true
+  log_screenshots: true
+  ocr_enabled: false  # disabled for privacy concerns
+
+modes:
+  patch_approval: true
+  safe_editing: true
+  conversational: true
+
+identity:
+  name: AIAS
+  creator: Ricky
+  root_path: "/home/Riekard/dev/aias_dev"
+
+learning_rate: 0.1
+max_iterations: 1000
+ml_algorithms:
+  - "linear_regression"
+  - "decision_tree"
+  - "random_forest"
+  - "neural_network"
+
+ai:
+  self_awareness: true
+  reasoning_model: internal_planner_v1
+  memory_retention: high
+  feedback_enabled: true
+  interaction_mode: adaptive
+```
+
+Regarding the OCR, I've disabled it for privacy concerns. However, you can enable it if necessary while keeping in mind the potential privacy implications. The other changes made are to broaden the read-only paths and adjust the write-allowed paths according to your home directory.
