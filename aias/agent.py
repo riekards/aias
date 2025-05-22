@@ -1,5 +1,6 @@
+# aias/agent.py
+
 import os
-import sys
 import json
 import threading
 import queue
@@ -16,7 +17,7 @@ from transformers import (
 
 from utils.config import load_config
 from utils.patcher import safe_update_file
-from aias.commands import search  # corrected import path
+from aias.commands.search import search_google
 
 # ── Configuration ────────────────────────────────────────────────────────────
 CONFIG         = load_config()
@@ -116,9 +117,8 @@ def ask_llm(prompt: str) -> str:
     inputs = gen_tok(prompt, return_tensors="pt", truncation=True, max_length=1024).to(gen_model.device)
     out    = gen_model.generate(**inputs, max_new_tokens=256, do_sample=True, top_p=0.9)
     resp   = gen_tok.decode(out[0], skip_special_tokens=True).strip()
-    # fallback to search if uncertain
     if re.search(r"\b(i don[’']t know|not sure)\b", resp, re.IGNORECASE):
-        snippets = search.search_google(prompt)[:5]
+        snippets = search_google(prompt)[:5]
         enhanced = prompt + "\n\n# Web results:\n" + "\n".join(f"- {s}" for s in snippets)
         inputs2 = gen_tok(enhanced, return_tensors="pt", truncation=True, max_length=1024).to(gen_model.device)
         out2    = gen_model.generate(**inputs2, max_new_tokens=256, do_sample=True, top_p=0.9)
