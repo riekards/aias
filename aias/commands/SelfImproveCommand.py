@@ -1,48 +1,68 @@
-import os
+# aias/commands/SelfImproveCommand.py
+
+import json
+import re
 from pathlib import Path
-from typing import Any, List
-from aias.agent import index_files, known_files, propose_patch
+from typing import List
+
+HISTORY_PATH = Path("memory/self_improve_history.json")
 
 class SelfImproveCommand:
-    """
-    Batch full-file patches: for each .py file, ask the LLM
-    to refactor/improve it, queue one patch per file.
-    Creates a backup copy before queuing.
-    """
+    def execute(self) -> str:
+        """
+        1) Load previously queued insights from history.
+        2) Run self-reflection to get fresh insights.
+        3) Filter out duplicates.
+        4) Queue new insights as patch tasks.
+        5) Save updated history.
+        6) Return a summary of what was queued.
+        """
+        # 1) Load past history
+        if HISTORY_PATH.exists():
+            try:
+                history = set(json.loads(HISTORY_PATH.read_text(encoding="utf-8")))
+            except json.JSONDecodeError:
+                history = set()
+        else:
+            history = set()
 
-    def __init__(self, project_root: str = None):
-        self.root = Path(project_root or os.getcwd())
-
-    def execute(self, args: Any = None) -> str:
-        # Re-index to get source list
-        index_files(str(self.root))
-        py_files: List[str] = [
-            f for f in known_files
-            if f.endswith(".py") and not f.startswith(".git/") and "/." not in f
+        # 2) Get fresh insights
+        from aias.commands.SelfReflectCommand import SelfReflectCommand
+        raw = SelfReflectCommand().execute()
+        # strip header and split into bullet lines
+        body = raw.split(":", 1)[-1]
+        insights = [
+            line[2:].strip()
+            for line in body.splitlines()
+            if line.startswith("- ")
         ]
-        if not py_files:
-            return "❌ No Python files found to improve."
 
-        # Build a multi-file prompt header
-        prompt_header = (
-            "You are AIAS. Please refactor and improve the following files "
-            "to make me more sentient, robust, and efficient.  \n\n"
-            + "\n".join(f"- {f}" for f in py_files)
-        )
+        if not insights:
+            return "⚠️ No actionable insights to queue."
 
-        queued = []
-        for rel in py_files:
-            src = Path(rel)
-            # Backup
-            backup_dir = self.root / "memory" / "backups"
-            backup_dir.mkdir(exist_ok=True, parents=True)
-            bak = backup_dir / f"{src.name}.bak"
-            if not bak.exists():
-                bak.write_bytes((self.root/src).read_bytes())
+        # 3) Filter out already-queued ones
+        new_insights = [ins for ins in insights if ins not in history]
+        if not new_insights:
+            return "✅ All self-improvement suggestions have already been queued."
 
-            # Task: improve this file
-            task = prompt_header + f"\n\n--- Improve {rel} ---"
-            propose_patch(rel, task)
-            queued.append(rel)
+        # 4) Queue and record them
+        from aias.agent import background_tasks, resolve_path
 
-        return "✅ Queued full-file patches for:\n" + "\n".join(f"- {f}" for f in queued)
+        queued: List[str] = []
+        for insight in new_insights:
+            # try to extract a filename in backticks, else default to agent.py
+            m = re.search(r"`([^`]+\.py)`", insight)
+            fn = m.group(1) if m else "agent.py"
+            path = resolve_path(fn) or fn
+            background_tasks.put((path, insight))
+            queued.append(f"- [{path}] {insight}")
+            history.add(insight)
+
+        # 5) Save updated history
+        HISTORY_PATH.parent.mkdir(exist_ok=True)
+        HISTORY_PATH.write_text(json.dumps(list(history)), encoding="utf-8")
+
+        # 6) Build and return report
+        report = ["🛠️ Queued new self-improvement tasks:"]
+        report.extend(queued)
+        return "\n".join(report)

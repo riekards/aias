@@ -22,7 +22,7 @@ class RLTrainingCommand:
 
         # Hyperparameters
         self.lr           = cfg.get("learning_rate", 0.001)
-        self.max_eps      = cfg.get("max_iterations", 1000)
+        self.max_eps      = cfg.get("max_iterations", 2000)
         self.gamma        = cfg.get("discount_factor", 0.99)
         self.batch_size   = cfg.get("batch_size", 16)
         self.epsilon_start= cfg.get("epsilon_start", 0.3)
