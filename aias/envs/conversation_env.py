@@ -19,7 +19,7 @@ class UserSimulator:
 
 class ConversationEnv:
     """
-    A Gym‐style environment for conversational RL.
+    A Gym-style environment for conversational RL.
     - state: embedding of [last user utterance, last AI response]
     - action: index into a discrete set of canned responses
     - reward: +1 if the AI’s choice “matches” an expected response, else 0
@@ -29,11 +29,6 @@ class ConversationEnv:
                  ai_responses: List[str],
                  expected_map: Dict[str, List[int]],
                  embed_model_name: str = "all-MiniLM-L6-v2"):
-        """
-        :param user_script: list of user utterances to cycle through
-        :param ai_responses: list of possible AI response strings (your action space)
-        :param expected_map: mapping from user utterance -> list of good action indices
-        """
         self.user = UserSimulator(user_script)
         self.ai_responses = ai_responses
         self.expected = expected_map
@@ -48,7 +43,6 @@ class ConversationEnv:
 
     @property
     def state_size(self) -> int:
-        # state is two embeddings concatenated
         emb_dim = self.encoder.get_sentence_embedding_dimension()
         return emb_dim * 2
 
@@ -68,8 +62,7 @@ class ConversationEnv:
         Take an action (index into ai_responses).
         Returns (next_state, reward, done, info).
         """
-        ai_choice = self.ai_responses[action_idx]
-        self.last_ai = ai_choice
+        self.last_ai = self.ai_responses[action_idx]
 
         # Compute reward: 1 if action in expected list for this user utterance
         good_actions = self.expected.get(self.last_user, [])
@@ -90,39 +83,13 @@ class ConversationEnv:
         """
         Encode [last_user, last_ai] into a single tensor of shape (state_size,).
         """
-        texts = [self.last_user, self.last_ai or ""]  # avoid empty
+        texts = [self.last_user, self.last_ai or ""]
         embeddings = self.encoder.encode(texts, convert_to_tensor=True, device=self.device)
         # embeddings shape: (2, emb_dim)
-        return embeddings.view(-1)  # shape: (2*emb_dim,)
-
-# Example usage:
-if __name__ == "__main__":
-    # Define a tiny script and response set
-    script = [
-        "Hi AIAS, how are you?",
-        "Can you locate agent.py?",
-        "Thanks, bye!"
-    ]
-    responses = [
-        "Hello! I’m doing great, thanks for asking.",
-        "Sure—agent.py is in aias/agent.py.",
-        "You’re welcome! Talk to you later."
-    ]
-    # Map each user utterance to the indices of good responses
-    expected = {
-        script[0]: [0],
-        script[1]: [1],
-        script[2]: [2]
-    }
-    env = ConversationEnv(script, responses, expected)
-    state = env.reset()
-    print("Initial state size:", state.shape)
-    next_state, reward, done, info = env.step(1)
-    print("Reward:", reward, "Done:", done, "Info:", info)
+        return embeddings.view(-1)
 
 if __name__ == "__main__":
-    import random
-    # Example user script and AI response set
+    # Smoke test for the environment
     user_script = [
         "Hi AIAS, how are you?",
         "Can you locate agent.py?",
@@ -133,25 +100,19 @@ if __name__ == "__main__":
         "Sure—agent.py is in aias/agent.py.",
         "You’re welcome! Talk to you later."
     ]
-    # Map each user utterance to the indices of acceptable AI responses
     expected_map = {
         user_script[0]: [0],
         user_script[1]: [1],
         user_script[2]: [2]
     }
 
-    # Instantiate the environment
     env = ConversationEnv(user_script, ai_responses, expected_map)
-
-    # Reset to get the initial state
     state = env.reset()
     print("Initial state shape:", state.shape)
 
-    # Take one random action
     action = random.randrange(env.action_size)
     next_state, reward, done, info = env.step(action)
 
-    # Inspect outputs
     print(f"Chose action #{action}: \"{ai_responses[action]}\"")
     print("Next state shape:", next_state.shape)
     print("Reward:", reward)

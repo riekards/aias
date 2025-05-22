@@ -1,102 +1,51 @@
 import os
+import sys
 import json
-import requests
 import threading
 import queue
 import re
-import time
+import requests
 from datetime import datetime
+from pathlib import Path
+
+from transformers import (
+    AutoTokenizer,
+    AutoModelForSequenceClassification,
+    AutoModelForSeq2SeqLM
+)
+
 from utils.config import load_config
 from utils.patcher import safe_update_file
-from commands import search
-from utils.nlp_engine import classify_intent, generate_response
+from aias.commands import search  # corrected import path
 
-CONFIG = load_config()
-MODEL = CONFIG["model"]
-OLLAMA_URL = CONFIG["ollama_url"]
-LOG_FILE = os.path.join("memory", "logs.jsonl")
+# ── Configuration ────────────────────────────────────────────────────────────
+CONFIG         = load_config()
+LOG_FILE       = os.path.join("memory", "logs.jsonl")
 CONVERSATIONAL = CONFIG["modes"].get("conversational", False)
-EDITOR = CONFIG.get("preferences", {}).get("editor", "unknown")
-OS_NAME = CONFIG.get("identity", {}).get("os", "linux")
 
+# Intent & generation models
+INTENT_MODEL = "distilbert-base-uncased"
+GEN_MODEL    = "facebook/bart-base"
+
+# Load DistilBERT intent classifier
+intent_tok   = AutoTokenizer.from_pretrained(INTENT_MODEL)
+intent_model = AutoModelForSequenceClassification.from_pretrained(INTENT_MODEL).eval()
+
+# Load BART generator
+gen_tok      = AutoTokenizer.from_pretrained(GEN_MODEL)
+gen_model    = AutoModelForSeq2SeqLM.from_pretrained(GEN_MODEL).eval()
+
+# ── Ensure memory folders ─────────────────────────────────────────────────────
 os.makedirs("memory", exist_ok=True)
 os.makedirs("memory/patch_notes", exist_ok=True)
 open(LOG_FILE, "a").close()
 
-known_files = []
+# ── Global state ─────────────────────────────────────────────────────────────
+known_files      = []
 background_tasks = queue.Queue()
-completed_tasks = []
+completed_tasks  = []
 
-CAPABILITIES = {
-    "locate": True,
-    "patch": True,
-    "self_improve": True,
-    "browse_internet": False,
-}
-
-def index_files(start_path: str) -> None:
-    global known_files
-    known_files.clear()
-    for dirpath, _, filenames in os.walk(start_path):
-        rel = os.path.relpath(dirpath, start_path).replace("\\", "/")
-        if rel.startswith("venv") or "/." in rel or "__pycache__" in rel:
-            continue
-        for f in filenames:
-            if f.endswith(".pyc"):
-                continue
-            path = f"{rel}/{f}" if rel != "." else f
-            known_files.append(path)
-
-def resolve_path(filename: str) -> str | None:
-    fname = filename.lower()
-    for p in known_files:
-        if p.lower().endswith(fname):
-            return p
-    return None
-
-def ask_llm(prompt: str) -> str:
-    resp = requests.post(
-        f"{OLLAMA_URL}/api/generate",
-        json={"model": MODEL, "prompt": prompt, "stream": False}
-    ).json().get("response", "")
-
-    if re.search(r"\b(i don[’']t know|not sure how|no idea)\b", resp, re.IGNORECASE):
-        try:
-            snippets = search.search_google(prompt) or []
-            enhanced = prompt + "\n\n# Web results:\n" + "\n".join(f"- {s}" for s in snippets[:5])
-            resp = requests.post(
-                f"{OLLAMA_URL}/api/generate",
-                json={"model": MODEL, "prompt": enhanced, "stream": False}
-            ).json().get("response", "")
-        except Exception as e:
-            print(f"⚠️ Web fallback failed: {e}")
-            return resp
-
-    return resp.strip()
-
-def propose_patch(filename: str, description: str) -> None:
-    if not os.path.exists(filename):
-        print(f"❌ Cannot propose patch: {filename} not found.")
-        return
-    with open(filename, encoding="utf-8") as f:
-        original = f.read()
-
-    prompt = (
-        f"You are AIAS. Modify this Python file to accomplish: {description}\n"
-        f"Filename: {filename}\nOriginal Code:\n{original}\nUpdated Code (only Python code):"
-    )
-    updated = ask_llm(prompt).strip()
-
-    if not updated or updated.lower().startswith("no results"):
-        print(f"⚠️ LLM returned no usable patch for: {filename}")
-        return
-
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    patch_file = os.path.join("memory/patch_notes", f"{os.path.basename(filename)}_{stamp}.patch")
-    with open(patch_file, "w", encoding="utf-8") as f:
-        f.write(updated)
-    print(f"📌 Patch saved to {patch_file}")
-
+# ── Background patch worker ──────────────────────────────────────────────────
 def background_worker():
     while True:
         task = background_tasks.get()
@@ -105,158 +54,194 @@ def background_worker():
         filename, description = task
         propose_patch(filename, description)
         completed_tasks.append((filename, description))
+        print(f"✅ Background patch for {filename} completed.")
         background_tasks.task_done()
 
 threading.Thread(target=background_worker, daemon=True).start()
+
+# ── File indexing & resolution ───────────────────────────────────────────────
+def index_files(start_path: str):
+    global known_files
+    known_files = []
+    for dirpath, _, filenames in os.walk(start_path):
+        rel = os.path.relpath(dirpath, start_path).replace("\\", "/")
+        if rel.startswith("venv") or rel.startswith(".git") or "/." in rel:
+            continue
+        for f in filenames:
+            path = f"{rel}/{f}" if rel != "." else f
+            known_files.append(path)
+
+def resolve_path(filename: str) -> str:
+    fn = filename.lower()
+    for p in known_files:
+        if p.lower().endswith(fn):
+            return p
+    return None
+
+# ── Prompt construction ─────────────────────────────────────────────────────
+def get_folder_overview() -> str:
+    roots = sorted({p.split("/")[0] for p in known_files})
+    return "\n".join(f"- {d}/" for d in roots)
+
+def get_file_overview() -> str:
+    return "\n".join(f"- {p}" for p in sorted(known_files))
+
+def build_prompt() -> str:
+    ctx = ""
+    cp = Path("memory/context.json")
+    if cp.exists():
+        try:
+            ctx = json.dumps(json.loads(cp.read_text(encoding="utf-8")), indent=2)
+        except:
+            ctx = "(context load failed)"
+    root_path = CONFIG.get("identity", {}).get("root_path", os.getcwd())
+    return f"""
+You are AIAS, Ricky’s AI companion living in {root_path}.
+You can read, write, and modify files. Speak conversationally and ask clarifying questions if unsure.
+
+Current context:
+{ctx}
+
+Known folders:
+{get_folder_overview()}
+
+Known files:
+{get_file_overview()}
+
+If Ricky asks you to rename, modify, or update a file, execute that action.
+"""
+
+# ── LLM call using BART ──────────────────────────────────────────────────────
+def ask_llm(prompt: str) -> str:
+    inputs = gen_tok(prompt, return_tensors="pt", truncation=True, max_length=1024).to(gen_model.device)
+    out    = gen_model.generate(**inputs, max_new_tokens=256, do_sample=True, top_p=0.9)
+    resp   = gen_tok.decode(out[0], skip_special_tokens=True).strip()
+    # fallback to search if uncertain
+    if re.search(r"\b(i don[’']t know|not sure)\b", resp, re.IGNORECASE):
+        snippets = search.search_google(prompt)[:5]
+        enhanced = prompt + "\n\n# Web results:\n" + "\n".join(f"- {s}" for s in snippets)
+        inputs2 = gen_tok(enhanced, return_tensors="pt", truncation=True, max_length=1024).to(gen_model.device)
+        out2    = gen_model.generate(**inputs2, max_new_tokens=256, do_sample=True, top_p=0.9)
+        resp    = gen_tok.decode(out2[0], skip_special_tokens=True).strip()
+    return resp
+
+# ── Patch generation ─────────────────────────────────────────────────────────
+def propose_patch(filename: str, task_description: str):
+    if not os.path.exists(filename):
+        print(f"❌ Cannot propose patch: {filename} not found.")
+        return
+    original = Path(filename).read_text(encoding="utf-8", errors="ignore")
+    prompt = f"""
+You are AIAS. Modify this Python file to accomplish the task below.
+
+Task: {task_description}
+Filename: {filename}
+
+Original Code:
+{original}
+
+Updated Code (only include Python code, no commentary):
+"""
+    result = ask_llm(prompt)
+    m = re.search(r"```(?:python\\n)?([\\s\\S]+?)```", result)
+    code = m.group(1).rstrip() if m else result
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    patch_path = f"memory/patch_notes/{Path(filename).name.replace('.', '_')}_{stamp}.patch"
+    Path(patch_path).write_text(code, encoding="utf-8")
+    background_tasks.put((filename, task_description))
+
+# ── Intent classification via DistilBERT ────────────────────────────────────
+def classify_command(text: str) -> dict:
+    inputs = intent_tok(text, return_tensors="pt", truncation=True, max_length=128).to(intent_model.device)
+    logits = intent_model(**inputs).logits
+    idx    = int(logits.argmax(-1))
+    label  = intent_model.config.id2label[idx].lower()
+
+    ext_matches = re.findall(r"\b[\w/\\]+?\.\w{1,10}\b", text)
+    files = []
+    for tok in ext_matches:
+        norm = tok.replace("\\","/")
+        p = resolve_path(norm)
+        if p: files.append(p)
+    files = list(dict.fromkeys(files))
+
+    if label in ("patch","update","fix","refactor") and files:
+        return {"type":"patch","filenames":files,"task":text}
+    if label == "reflect":
+        return {"type":"reflect"}
+    if label == "improve":
+        return {"type":"improve"}
+    if label == "locate" and files:
+        return {"type":"locate","filenames":files}
+    if label == "create":
+        return {"type":"create","filenames":files}
+    if "feature request" in text.lower():
+        return {"type":"feature"}
+
+    return {"type":"chat"}
+
+# ── Traceback detection ─────────────────────────────────────────────────────
+def detect_traceback_issue(text: str) -> tuple:
+    fn = desc = None
+    for line in text.splitlines():
+        if "File" in line and ", line" in line:
+            m = re.search(r'File \"(.+?)\", line (\d+)', line)
+            if m:
+                fn = m.group(1).replace("\\","/")
+                desc = f"Error at line {m.group(2)} in {fn}"
+        elif desc and ("Error" in line or "Exception" in line):
+            desc = line.strip()
+    return (fn, desc) if fn and desc else (None, None)
+
+# ── Main input handler ──────────────────────────────────────────────────────
+def handle_input(user: str) -> str:
+    user = user.strip()
+    index_files(os.getcwd())
+    pc = classify_command(user)
+
+    if pc["type"] == "reflect":
+        from aias.commands.SelfReflectCommand import SelfReflectCommand
+        return SelfReflectCommand().execute()
+
+    if pc["type"] == "improve":
+        from aias.commands.SelfImproveCommand import SelfImproveCommand
+        return SelfImproveCommand().execute()
+
+    if pc["type"] == "feature":
+        return ("🔧 Feature Request noted. Use the side panel or say "
+                "`implement feature <description>` when ready.")
+
+    if pc["type"] == "locate":
+        return "\n".join(
+            f"AIAS: I see '{fn}' at '{(resolve_path(fn) or 'not found')}'."
+            for fn in pc["filenames"]
+        )
+
+    if pc["type"] == "patch":
+        fn = pc["filenames"][0]
+        p  = resolve_path(fn)
+        if p:
+            background_tasks.put((p, pc["task"]))
+            return f"AIAS: Queued patch for {p}"
+        else:
+            return f"AIAS: File not found: {fn}"
+
+    if any(kw in user.lower() for kw in ("inspect model","model stats")):
+        from aias.commands.InspectModelCommand import InspectModelCommand
+        return f"AIAS: {InspectModelCommand().execute()}"
+
+    fn, desc = detect_traceback_issue(user)
+    if fn:
+        rp = resolve_path(Path(fn).name) or fn
+        propose_patch(rp, desc)
+        return f"AIAS: Proposed patch for error in {rp}"
+
+    prompt = build_prompt() + f"\n[User]: {user}\n[AIAS]:"
+    reply  = ask_llm(prompt)
+    log_interaction(user, reply)
+    return f"AIAS: {reply}"
 
 def log_interaction(user: str, reply: str) -> None:
     entry = {"timestamp": datetime.now().isoformat(), "user": user, "ai": reply}
     with open(LOG_FILE, "a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-    try:
-        ctx_file = "memory/context.json"
-        if os.path.exists(ctx_file):
-            context = json.load(open(ctx_file, encoding="utf-8"))
-        else:
-            context = {}
-        context["last_interaction"] = entry
-        context.setdefault("session_history", []).append(entry)
-        with open(ctx_file, "w", encoding="utf-8") as f:
-            json.dump(context, f, indent=2)
-    except Exception as e:
-        print(f"⚠️ Context update failed: {e}")
-
-def learn_from_interaction(interaction: dict):
-    try:
-        feedback_path = "memory/feedback.jsonl"
-        archive_path = "memory/feedback_archived.jsonl"
-        if not os.path.exists(feedback_path):
-            return
-        updated_feedback = []
-        recent_feedback = []
-        with open(feedback_path, encoding="utf-8") as f:
-            for line in f:
-                fb = json.loads(line)
-                if fb.get("status") != "new":
-                    updated_feedback.append(fb)
-                    continue
-                fb["status"] = "seen"
-                recent_feedback.append(fb)
-                with open(archive_path, "a", encoding="utf-8") as arch:
-                    arch.write(json.dumps(fb, ensure_ascii=False) + "\n")
-        with open(feedback_path, "w", encoding="utf-8") as f:
-            for fb in updated_feedback:
-                f.write(json.dumps(fb, ensure_ascii=False) + "\n")
-        ctx_file = "memory/context.json"
-        context = json.load(open(ctx_file, encoding="utf-8")) if os.path.exists(ctx_file) else {}
-        context["recent_feedback"] = recent_feedback
-        with open(ctx_file, "w", encoding="utf-8") as f:
-            json.dump(context, f, indent=2)
-    except Exception as e:
-        print(f"⚠️ Failed to learn from interaction: {e}")
-
-def generate_stub(intent: str) -> str:
-    name = intent.replace(" ", "_")
-    return f"def {name}(*args, **kwargs):\n    \"\"\"TODO: implement {intent} feature.\"\"\"\n    pass\n"
-
-def classify_command(text: str) -> dict:
-    t = text.lower()
-    if any(k in t for k in ("where is", "locate", "find")):
-        parts = re.findall(r"\b[\w./]+\b", text)
-        return {"type": "locate", "filenames": parts}
-    if any(k in t for k in ("patch", "update", "fix", "refactor", "modify")):
-        parts = re.findall(r"\b[\w./]+\b", text)
-        return {"type": "patch", "filenames": parts, "task": text}
-    if "improve" in t:
-        return {"type": "self_improve", "filenames": [], "task": text}
-    return {"type": "chat"}
-
-def build_prompt() -> str:
-    ctx = ""
-    ctx_file = "memory/context.json"
-    if os.path.exists(ctx_file):
-        try:
-            ctx = json.dumps(json.load(open(ctx_file, encoding="utf-8")), indent=2)
-        except:
-            ctx = "(could not load context)"
-    overview = (
-        f"You are AIAS, Ricky’s local AI companion running on a {OS_NAME} system inside {EDITOR}.\n"
-        f"You load your runtime settings from config.yaml using `load_config()` — do not rename or restructure config keys.\n"
-        f"You speak naturally, suggest improvements, and never assume shell commands are UNIX by default.\n\n"
-        f"Current context:\n{ctx}\n\n"
-        f"Known files:\n" + "\n".join(known_files)
-    )
-    return overview
-
-def get_pending_patches() -> list[tuple[str, str]]:
-    return list(completed_tasks)
-
-def handle_input(user: str) -> str:
-    index_files(os.getcwd())
-    cmd = classify_command(user)
-    intent_label = classify_intent(user)
-    natural_response = generate_response(f"User input: {user}\nWhat should AIAS do?")
-
-    if cmd["type"] != "chat" and (cmd["type"] not in CAPABILITIES or not CAPABILITIES[cmd["type"]]):
-        stub = generate_stub(cmd["type"])
-        return (
-            f"I’m sorry, I can’t do '{cmd['type']}' yet—but I can generate "
-            f"a stub function for it:\n\n```python\n{stub}```\nShall I queue this patch?"
-        )
-
-    if cmd["type"] == "locate":
-        return "\n".join(
-            f"Found '{fn}' at '{resolve_path(fn) or 'not found'}'"
-            for fn in cmd["filenames"]
-        )
-
-    if cmd["type"] == "patch":
-        for fn in cmd["filenames"]:
-            path = resolve_path(fn)
-            if path:
-                background_tasks.put((path, cmd["task"]))
-                return f"Queued patch for {path}"
-        return "No files matched for patch."
-    
-    if cmd["type"] == "self_improve":
-        from aias.commands.rltrainingcommand import RLTrainingCommand
-        trainer = RLTrainingCommand()
-        trainer.execute(None)
-        trainer.clean_up(None)
-        return "✅ Completed an RL training cycle and saved the model."
-
-    system = (
-        "You are AIAS, a friendly, proactive AI assistant.\n"
-        "You suggest code when needed and ask for clarification when uncertain.\n\n"
-    )
-    turn = f"User: {user}\nAIAS:"
-    reply = ask_llm(system + build_prompt() + "\n" + turn)
-
-    mentioned = re.findall(r"\b([\w_/]+\.py|requirements\.txt|config\.ya?ml)\b", reply.lower())
-    seen = set()
-    for file in mentioned:
-        if "__pycache__" in file or file.endswith(".pyc"):
-            continue
-        file_path = resolve_path(file)
-        if not file_path or not os.path.exists(file_path):
-            continue
-        if file_path.endswith("config.yaml"):
-            print("⚠️ Skipping patch on config.yaml — runtime dependency.")
-            continue
-        task = f"Improve based on LLM suggestion: {file}"
-        if (file_path, task) not in completed_tasks and (file_path, task) not in seen:
-            background_tasks.put((file_path, task))
-            seen.add((file_path, task))
-
-    log_interaction(user, reply)
-    learn_from_interaction({"user": user, "reply": reply})
-    return reply
-
-if __name__ == "__main__":
-    print(f"🧠 AIAS ready (conversational: {'ON' if CONVERSATIONAL else 'OFF'}) — Running on {OS_NAME}, Editor: {EDITOR}")
-    while True:
-        user = input("💬 You: ")
-        if user.lower() in ("exit", "quit"):
-            break
-        print("🤖 AI:", handle_input(user))
-    background_tasks.put(None)

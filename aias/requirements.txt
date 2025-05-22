@@ -5,3 +5,4 @@ pygetwindow
 pillow
 pyyaml
 torch
+sentence-transformers

@@ -1,110 +1,160 @@
 import os
 import sys
-from PyQt5.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout,
-    QPushButton, QTextEdit, QMessageBox, QListWidget, QHBoxLayout,
-    QDialog, QLabel
-)
-from PyQt5.QtCore import QTimer
+import json
 
-# Ensure project root in path
-this_dir = os.path.dirname(__file__)
-project_root = os.path.abspath(os.path.join(this_dir, os.pardir))
+# ── Make sure we can import the aias package ─────────────────────────
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from aias.agent import (
-    index_files, handle_input,
-    get_pending_patches, background_tasks,
-    propose_patch
+from PyQt5.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout,
+    QPushButton, QTextEdit, QMessageBox, QListWidget, QHBoxLayout,
+    QLineEdit, QLabel, QSplitter
 )
+from PyQt5.QtCore import QTimer, Qt
 
-class PatchReviewDialog(QDialog):
-    def __init__(self, filename, description, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle(f"Review Patch: {filename}")
-        self.setMinimumSize(500, 300)
+from aias.agent import handle_input, background_tasks, completed_tasks, propose_patch, resolve_path
 
-        layout = QVBoxLayout(self)
-
-        label = QLabel(f"<b>{filename}</b>")
-        layout.addWidget(label)
-
-        self.text = QTextEdit()
-        self.text.setReadOnly(True)
-        self.text.setText(description)
-        layout.addWidget(self.text)
-
-        approve_btn = QPushButton("✅ Approve Patch")
-        decline_btn = QPushButton("❌ Decline Patch")
-
-        approve_btn.clicked.connect(lambda: self.accept_patch(filename, description))
-        decline_btn.clicked.connect(self.reject)
-
-        layout.addWidget(approve_btn)
-        layout.addWidget(decline_btn)
-
-    def accept_patch(self, fn, desc):
-        propose_patch(fn, desc)
-        self.accept()
 
 class GuiMainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("AIAS GUI")
-        self.resize(600, 500)
+        self.resize(800, 600)
 
-        index_files(project_root)
+        # Main splitter to divide chat and feature panel
+        splitter = QSplitter(Qt.Horizontal)
+        self.setCentralWidget(splitter)
 
-        central = QWidget()
-        self.setCentralWidget(central)
-        layout = QVBoxLayout(central)
+        # Left side: Chat and patches
+        left = QWidget()
+        left_layout = QVBoxLayout(left)
 
+        # Chat display
         self.chatbox = QTextEdit()
         self.chatbox.setReadOnly(True)
-        layout.addWidget(self.chatbox)
+        left_layout.addWidget(self.chatbox)
 
-        self.input_box = QTextEdit()
-        self.input_box.setFixedHeight(60)
-        layout.addWidget(self.input_box)
+        # Input box
+        self.input_box = QLineEdit()
+        self.input_box.returnPressed.connect(self.on_send)
+        left_layout.addWidget(self.input_box)
 
-        send_btn = QPushButton("Send")
-        send_btn.clicked.connect(self.on_send)
-        layout.addWidget(send_btn)
+        # Send button
+        self.exec_btn = QPushButton("Send")
+        self.exec_btn.clicked.connect(self.on_send)
+        left_layout.addWidget(self.exec_btn)
 
+        # Patch request list
+        left_layout.addWidget(QLabel("Pending Patches:"))
         self.patch_list = QListWidget()
-        self.patch_list.itemDoubleClicked.connect(self.on_patch_selected)
-        layout.addWidget(self.patch_list)
+        left_layout.addWidget(self.patch_list)
 
+        # Approve/Decline buttons
+        btn_row = QHBoxLayout()
+        self.approve_btn = QPushButton("Approve Patch")
+        self.decline_btn = QPushButton("Decline Patch")
+        btn_row.addWidget(self.approve_btn)
+        btn_row.addWidget(self.decline_btn)
+        left_layout.addLayout(btn_row)
+        self.approve_btn.clicked.connect(self.on_approve)
+        self.decline_btn.clicked.connect(self.on_decline)
+
+        splitter.addWidget(left)
+
+        # Right side: Feature requests panel
+        right = QWidget()
+        right_layout = QVBoxLayout(right)
+        right_layout.addWidget(QLabel("Feature Requests:"))
+
+        # Feature input
+        self.feature_input = QLineEdit()
+        self.feature_input.setPlaceholderText("Describe new feature…")
+        right_layout.addWidget(self.feature_input)
+
+        self.add_feature_btn = QPushButton("Queue Feature Request")
+        self.add_feature_btn.clicked.connect(self.on_queue_feature)
+        right_layout.addWidget(self.add_feature_btn)
+
+        # Feature queue list
+        self.feature_list = QListWidget()
+        right_layout.addWidget(self.feature_list)
+
+        # Save feature requests button
+        self.save_features_btn = QPushButton("Save Feature Requests")
+        self.save_features_btn.clicked.connect(self.on_save_features)
+        right_layout.addWidget(self.save_features_btn)
+
+        splitter.addWidget(right)
+
+        # Timer to refresh patch list every second
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.refresh_patches)
         self.timer.start(1000)
 
     def on_send(self):
-        user_text = self.input_box.toPlainText().strip()
+        user_text = self.input_box.text().strip()
         if not user_text:
             return
-        self.chatbox.append(f"User: {user_text}")
-        response = handle_input(user_text)
+
+        # Display user
+        self.chatbox.append(f"You: {user_text}")
+
+        # Handle via agent
+        try:
+            response = handle_input(user_text)
+        except Exception as e:
+            response = f"⚠️ Exception in handle_input: {e}"
+
         for line in response.splitlines():
             self.chatbox.append(f"AIAS: {line}")
+
         self.input_box.clear()
 
     def refresh_patches(self):
         self.patch_list.clear()
-        for fn, desc in get_pending_patches():
-            title = f"{fn}: {desc[:80].strip()}..."
-            self.patch_list.addItem(title)
+        for fn, desc in completed_tasks:
+            self.patch_list.addItem(f"{fn}: {desc}")
 
-    def on_patch_selected(self, item):
+    def on_approve(self):
+        item = self.patch_list.currentItem()
         if not item:
             return
         fn, desc = item.text().split(":", 1)
-        dialog = PatchReviewDialog(fn.strip(), desc.strip(), self)
-        dialog.exec_()
+        propose_patch(fn.strip(), desc.strip())
+        QMessageBox.information(self, "Patch Applied", f"Applied patch to {fn.strip()}")
+
+    def on_decline(self):
+        item = self.patch_list.currentItem()
+        if not item:
+            return
+        fn, desc = item.text().split(":", 1)
+        # Remove from completed_tasks
+        completed_tasks[:] = [
+            (f, d) for f, d in completed_tasks
+            if not (f == fn.strip() and d == desc.strip())
+        ]
+        QMessageBox.information(self, "Patch Declined", f"Declined patch for {fn.strip()}")
+
+    def on_queue_feature(self):
+        text = self.feature_input.text().strip()
+        if text:
+            self.feature_list.addItem(text)
+            self.feature_input.clear()
+
+    def on_save_features(self):
+        # Save to memory/feature_requests.jsonl
+        path = os.path.join("memory", "feature_requests.jsonl")
+        with open(path, "a", encoding="utf-8") as f:
+            for idx in range(self.feature_list.count()):
+                req = self.feature_list.item(idx).text()
+                f.write(json.dumps({"feature": req}) + "\n")
+        QMessageBox.information(self, "Saved", f"Saved {self.feature_list.count()} feature requests.")
+
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    window = GuiMainWindow()
-    window.show()
+    win = GuiMainWindow()
+    win.show()
     sys.exit(app.exec_())

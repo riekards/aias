@@ -45,5 +45,5 @@ ai:
   feedback_enabled: true
   interaction_mode: adaptive
 
-state_size: 261
+state_size: 768
 action_size: 6
